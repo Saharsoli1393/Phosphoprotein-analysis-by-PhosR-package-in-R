@@ -1,0 +1,376 @@
+suppressPackageStartupMessages({
+  library(protr)
+  library(readxl)
+  library(mgsub)
+  library(stringr)
+  library(calibrate)
+  library(limma)
+  library(directPA)
+  library(annotate)
+  library(ggplot2)
+  library(ClueR)
+  library(reactome.db)
+  library(org.Mm.eg.db)
+  library(PhosR)
+  library(dplyr)
+  library(GGally)
+  library(ggpubr)
+  library(network)
+  library(clusterProfiler)
+  library(enrichplot)
+})
+
+setwd("C:/Users/ASUS.PIESC/Desktop/My Thesis/my whole work/PhosR/new")
+getwd()
+
+phosphopeptide_fetus <- read_excel("C:/Users/ASUS.PIESC/Desktop/My Thesis/my whole work/PhosR/new/3270_Liver_Phosphopeptides_Sets1_2_mouse_MS2_90min_1mc_RC_Percolator_CoIso75_NormTotal_allabund_.xlsx")
+seqs_fetus <- readFASTA("C:/Users/ASUS.PIESC/Desktop/My Thesis/my whole work/PhosR/new/fetus.fasta")
+
+#cleaning data
+fetus_genes <- sapply(strsplit(phosphopeptide_fetus$`Master Protein Descriptions`, "GN="), `[`, 2)
+
+fetus_genes <- sapply(strsplit(fetus_genes, " "), `[`, 1)
+fetus_acc <- sapply(strsplit(phosphopeptide_fetus$`Master Protein Accessions`, ";"), `[`, 1)
+
+fetus_relative_pos <- sapply(strsplit(phosphopeptide_fetus$Modifications, "Phospho "), `[`, 2)
+fetus_relative_pos <- mgsub(fetus_relative_pos,c("\\[|\\]","\\s*\\([^\\)]+\\)"),c("",""))
+fetus_relative_pos <- strsplit(fetus_relative_pos,"; ")
+
+fetus_pos <- c()
+for(i in 1:length(fetus_relative_pos)){
+  for(j in fetus_relative_pos[[i]]){
+    if(!grepl("/",j)&!grepl("TMT",j)){
+      fetus_pos <- append(fetus_pos,j)
+      names(fetus_pos)[length(fetus_pos)] <- i
+    }
+    
+  }
+}
+fetus_pos
+
+
+fetus_pos <- fetus_pos[grepl("[0-9]+", fetus_pos)]
+fetus_pos2 <- c()
+
+for (i in 1:length(fetus_pos)) {
+  pos <- gregexpr(phosphopeptide_fetus$Sequence[as.integer(names(fetus_pos)[i])], 
+                  seqs_fetus[grep(fetus_acc[as.integer(names(fetus_pos)[i])], names(seqs_fetus))])[[1]][1] + 
+    as.integer(str_extract(fetus_pos[i], "[0-9]+")) -1
+  fetus_pos2 <- append(fetus_pos2, paste0(str_extract(fetus_pos[i], "[aA-zZ]+"), pos))
+  
+}
+names(fetus_pos2) <- names(fetus_pos)
+fetus_pos2
+
+
+fetus_name <- paste(fetus_acc[as.integer(names(fetus_pos2))],fetus_genes[as.integer(names(fetus_pos2))],
+                    fetus_pos2,phosphopeptide_fetus$Sequence[as.integer(names(fetus_pos2))],sep = ";")
+
+###############################fetus
+#create PhosphoExperiment object
+
+# 53:74 -> Normalized # 31:52 -> abundance #  11:30 -> ratio (no remove)
+new_df <- phosphopeptide_fetus[as.integer(names(fetus_pos2)),31:52]
+
+
+new_df <- new_df[, -c(1, 12)]
+new_df$name <- fetus_name
+
+new_df <- new_df[!duplicated(new_df$name), ]
+tmp <- new_df$name
+
+new_df2 <- new_df[, c(1,2,3,11,12,4,5,6,13,14,7,8,15,16,17,9,10,18,19,20)]
+rownames(new_df2)
+new_df <- new_df[, -21]
+rownames(new_df) <- tmp
+
+
+colnames(new_df2)[1:5] = c("WT:WT_1","WT:WT_2","WT:WT_3","WT:WT_4","WT:WT_5")
+colnames(new_df2)[6:10] = c("WT:TG_1","WT:TG_2","WT:TG_3","WT:TG_4","WT:TG_5")
+colnames(new_df2)[11:15] = c("TG:WT_1","TG:WT_2","TG:WT_3","TG:WT_4","TG:WT_5")
+colnames(new_df2)[16:20] = c("TG:TG_1","TG:TG_2","TG:TG_3","TG:TG_4","TG:TG_5")
+rownames(new_df2) <- tmp
+
+
+ppe <- PhosphoExperiment(assays = list(Quantification = as.matrix(new_df2)))
+ppe
+
+GeneSymbol(ppe) <- sapply(strsplit(rownames(ppe), ";"), "[[", 2)
+Residue(ppe) <- gsub("[0-9]","", sapply(strsplit(rownames(ppe), ";"), "[[", 3))
+Site(ppe) <- as.numeric(gsub("[A-Z]","", sapply(strsplit(rownames(ppe), ";"), "[[", 3)))
+Sequence(ppe) <- sapply(strsplit(rownames(ppe), ";"), "[[", 4)
+ppe
+
+# Fetus
+grps = gsub("_[0-9]{1}", "", colnames(fetus_ppe))
+grps
+ppe_filtered <- selectGrps(fetus_ppe, grps, 0.5, n=1) 
+dim(ppe_filtered)
+
+# Placenta
+grps = gsub("_[0-9]{1}", "", colnames(placenta_ppe))
+grps
+ppe_filtered <- selectGrps(placenta_ppe, grps, 0.5, n=1) 
+dim(ppe_filtered)
+
+#imputation and normalizationq
+set.seed(123)
+ppe_imputed_tmp <- scImpute(ppe_filtered, 0.5, grps)[,colnames(ppe_filtered)]
+
+
+set.seed(123)
+ppe_imputed <- ppe_imputed_tmp
+ppe_imputed[,seq(5)] <- ptImpute(ppe_imputed[,seq(6,20)], 
+                                 ppe_imputed[,seq(5)], 
+                                 percent1 = 0.6, percent2 = 0, paired = FALSE)
+
+ppe_imputed_scaled <- medianScaling(ppe_imputed, scale = FALSE, assay = "imputed")
+
+ppe_imputed_scaled
+p1 = plotQC(SummarizedExperiment::assay(ppe_filtered,"Quantification"), 
+            labels=colnames(ppe_filtered), 
+            panel = "quantify", grps = grps)
+p2 = plotQC(SummarizedExperiment::assay(ppe_imputed_scaled,"scaled"), 
+            labels=colnames(ppe_imputed_scaled), panel = "quantify", grps = grps)
+ggpubr::ggarrange(p1, p2, nrow = 1)
+
+##########################################################################################
+data("SPSs")
+dim(ppe_imputed_scaled)
+sum(is.na(SummarizedExperiment::assay(ppe_imputed_scaled,"Quantification")))
+sites = paste(sapply(GeneSymbol(ppe_imputed_scaled), function(x)x),";",
+              sapply(Residue(ppe_imputed_scaled), function(x)x),
+              sapply(Site(ppe_imputed_scaled), function(x)x),
+              ";", sep = "")
+
+plotQC(SummarizedExperiment::assay(ppe_imputed_scaled,"Quantification"), grps=grps, 
+       labels = colnames(ppe_imputed_scaled), panel = "pca") +
+  ggplot2::ggtitle("Before batch correction")
+
+########################################################################################## Batch effect correction
+colnames(ppe_imputed_scaled) <- gsub(":","_",colnames(ppe_imputed_scaled))
+grps = gsub("_[0-9]{1}", "", colnames(ppe_imputed_scaled))
+design = model.matrix(~grps - 1)
+design
+sites <- toupper(sites)
+ctl = which(sites %in% SPSs)
+ppe_imputed_scaled = RUVphospho(ppe_imputed_scaled, M = design, k = 4, ctl = ctl)
+
+# plot after batch correction
+
+ppe_imputed_scaled <- medianScaling(ppe_imputed_scaled, scale = FALSE, assay = "normalised")
+
+# plot after batch correction
+p1 = plotQC(SummarizedExperiment::assay(ppe_imputed_scaled, "Quantification"), panel = "pca", 
+            grps=grps, labels = colnames(ppe_imputed_scaled)) +
+  ggplot2::ggtitle("Before Batch correction")
+p2 = plotQC(SummarizedExperiment::assay(ppe_imputed_scaled, "normalised"), grps=grps, 
+            labels = colnames(ppe_imputed_scaled), panel="pca") +
+  ggplot2::ggtitle("After Batch correction")
+ggpubr::ggarrange(p1, p2, nrow = 2)
+
+fit <- lmFit(SummarizedExperiment::assay(ppe_imputed_scaled, "normalised"), design)
+
+fit
+table.WT_WT <- topTable(eBayes(fit), number=Inf, coef = 1)
+table.WT_TG <- topTable(eBayes(fit), number=Inf, coef = 2)
+table.TG_WT <- topTable(eBayes(fit), number=Inf, coef = 3)
+table.TG_TG <- topTable(eBayes(fit), number=Inf, coef = 4)
+
+table.WT <- cbind(table.WT_WT, table.WT_TG) 
+table.TG <- cbind(table.TG_TG, table.TG_WT)
+
+
+DE1.RUV <- c(sum(table.WT_WT[,"adj.P.Val"] < 0.05), sum(table.WT_TG[,"adj.P.Val"] < 0.05), sum(table.TG_WT[,"adj.P.Val"] < 0.05), sum(table.TG_TG[,"adj.P.Val"] < 0.05))
+
+
+# contrast for WT vs TG
+contrast.matrix <- makeContrasts(WT = (grpsWT_WT + grpsWT_TG) / 2 - (grpsTG_WT + grpsTG_TG) / 2, levels = design)
+
+# Fit the linear model with the contrast
+fit_contrast <- contrasts.fit(fit, contrast.matrix)
+fit_contrast <- eBayes(fit_contrast)
+
+# Get the top table for the WT vs TG comparison
+table.WT_vs_TG <- topTable(fit_contrast, number=Inf)
+
+# Define significance thresholds
+threshold_pval <- 0.05
+threshold_logfc <- 1
+
+# Identify differentially expressed proteins in WT vs TG comparison
+de_proteins_WT_vs_TG <- table.WT_vs_TG[table.WT_vs_TG$adj.P.Val < threshold_pval & abs(table.WT_vs_TG$logFC) > threshold_logfc, ]
+num_de_proteins_WT_vs_TG <- nrow(de_proteins_WT_vs_TG)
+
+# Display the number of differentially expressed proteins
+cat("Number of differentially expressed proteins (WT vs TG):", num_de_proteins_WT_vs_TG, "\n")
+
+# Display the differentially expressed proteins
+print(de_proteins_WT_vs_TG)
+
+upregulated_WT_vs_TG <- sum(de_proteins_WT_vs_TG$logFC > threshold_logfc)
+downregulated_WT_vs_TG <- sum(de_proteins_WT_vs_TG$logFC < -threshold_logfc)
+
+# Display the results
+cat("WT vs TG: Upregulated =", upregulated_WT_vs_TG, "Downregulated =", downregulated_WT_vs_TG, "\n")
+
+# Extract gene symbols
+gene_symbols_WT_vs_TG <- sapply(strsplit(rownames(de_proteins_WT_vs_TG), ";"), `[`, 2)
+
+
+# Convert gene symbols to Entrez IDs
+entrez_ids_WT_vs_TG <- bitr(gene_symbols_WT_vs_TG, fromType="SYMBOL", toType="ENTREZID", OrgDb=org.Mm.eg.db)
+
+
+# Perform GO enrichment analysis for Biological Processes (BP)
+ego_WT_vs_TG <- enrichGO(gene         = entrez_ids_WT_vs_TG$ENTREZID,
+                         OrgDb        = org.Mm.eg.db,
+                         keyType      = "ENTREZID",
+                         ont          = "BP",
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = 0.05,
+                         qvalueCutoff = 0.2)
+
+# Visualize the results
+dotplot(ego_WT_vs_TG, showCategory=10) + ggtitle("GO Enrichment Analysis: WT vs TG")
+
+################################################################
+
+o <- rownames(de_proteins_WT_vs_TG)
+Tc <- cbind(table.TG[o,"logFC"], table.WT[o,"logFC"])
+
+rownames(Tc) <- sites[match(o, rownames(de_proteins_WT_vs_TG))]
+rownames(Tc) <- gsub("(.*)(;[A-Z])([0-9]+)(;)", "\\1;\\3;", rownames(Tc))
+colnames(Tc) <- c("WT", "TG")
+
+data('PhosphoSitePlus') 
+data('PhosphoELM')
+par(mfrow=c(1,2))
+
+####################### Kinases
+
+phosphoL6_WT_vs_TG <- na.omit(SummarizedExperiment::assay(ppe_imputed_scaled, "normalised")[rownames(de_proteins_WT_vs_TG), ])
+
+phosphoL6.mean_WT_vs_TG <- meanAbundance(phosphoL6_WT_vs_TG, grps = grps)
+aov_WT_vs_TG <- matANOVA(mat = phosphoL6_WT_vs_TG, grps = grps)
+idx_WT_vs_TG <- (aov_WT_vs_TG < 0.05) & (rowSums(phosphoL6.mean_WT_vs_TG > 0.05) > 0)
+phosphoL6.reg_WT_vs_TG <- phosphoL6_WT_vs_TG[idx_WT_vs_TG, , drop = FALSE]
+
+idx_WT_vs_TG <- !duplicated(paste0(sapply(strsplit(rownames(phosphoL6.reg_WT_vs_TG), ";"), "[[", 2), ";", 
+                                   sapply(strsplit(rownames(phosphoL6.reg_WT_vs_TG), ";"), "[[", 3), ";"))
+phosphoL6.reg_WT_vs_TG <- phosphoL6.reg_WT_vs_TG[idx_WT_vs_TG, ]
+
+L6.phos.std_WT_vs_TG <- standardise(phosphoL6.reg_WT_vs_TG)
+rownames(L6.phos.std_WT_vs_TG) <- paste0(sapply(strsplit(rownames(L6.phos.std_WT_vs_TG), ";"), "[[", 2), ";", 
+                                         sapply(strsplit(rownames(L6.phos.std_WT_vs_TG), ";"), "[[", 3), ";")
+L6.phos.seq_WT_vs_TG <- sapply(strsplit(rownames(phosphoL6.reg_WT_vs_TG), ";"), "[[", 4)
+rownames(L6.phos.std_WT_vs_TG) <- toupper(rownames(L6.phos.std_WT_vs_TG))
+class(L6.phos.std_WT_vs_TG)
+
+L6.matrices_WT_vs_TG <- kinaseSubstrateScore(substrate.list = PhosphoSite.mouse, 
+                                             mat = L6.phos.std_WT_vs_TG, seqs = L6.phos.seq_WT_vs_TG, 
+                                             numMotif = 5, numSub = 1, verbose = T)
+length(unique(rownames(L6.phos.std_WT_vs_TG)))
+
+set.seed(1)
+L6.predMat_WT_vs_TG <- kinaseSubstratePred(L6.matrices_WT_vs_TG, top = 30, verbose = T)
+L6.predMat_WT_vs_TG
+
+# Fetus
+kinaseOI <- c("CDK1", "CDK5", "MAP2K1")
+
+# Placenta
+kinaseOI <- c("MAPK14", "MTOR", "PRKAA1","PRKCE","RPS6KA5")
+
+
+
+Signalomes_results_WT_vs_TG <- Signalomes(KSR = L6.matrices_WT_vs_TG, 
+                                          predMatrix = L6.predMat_WT_vs_TG, 
+                                          exprsMat = L6.phos.std_WT_vs_TG, 
+                                          KOI = kinaseOI)
+
+my_color_palette <- grDevices::colorRampPalette(RColorBrewer::brewer.pal(8, "Accent"))
+kinase_all_color <- my_color_palette(ncol(L6.matrices_WT_vs_TG$combinedScoreMatrix))
+names(kinase_all_color) <- colnames(L6.matrices_WT_vs_TG$combinedScoreMatrix)
+kinase_signalome_color <- kinase_all_color[colnames(L6.predMat_WT_vs_TG)]
+
+plotSignalomeMap(signalomes = Signalomes_results_WT_vs_TG, color = kinase_signalome_color)
+plotKinaseNetwork(KSR = L6.matrices_WT_vs_TG, predMatrix = L6.predMat_WT_vs_TG, threshold = 0.9, color = kinase_all_color)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
